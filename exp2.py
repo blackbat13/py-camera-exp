@@ -4,6 +4,8 @@ import tkinter as tk
 from tkinter import ttk
 from PIL import Image, ImageTk
 from vcam import vcam,meshGen
+import dlib
+from imutils import face_utils
 
 WIDTH, HEIGHT = 800, 600
 
@@ -14,6 +16,11 @@ cap.set(cv2.CAP_PROP_FRAME_HEIGHT, HEIGHT)
 current_effect = 'dots'
 def_radius = 5
 strength = 0.0008
+
+face_detector = dlib.get_frontal_face_detector()
+landmark_predictor = dlib.shape_predictor("shape_predictor_68_face_landmarks.dat")
+
+# https://github.com/italojs/facial-landmarks-recognition/raw/master/shape_predictor_68_face_landmarks.dat
 
 def pepare_distortion1():
     H,W = HEIGHT, WIDTH
@@ -143,6 +150,82 @@ def retro_game_effect(image, color_depth=4):
     quantized = image // (256//color_depth) * (256//color_depth)
     return cv2.resize(cv2.resize(quantized, (64,48)), image.shape[1::-1], interpolation=cv2.INTER_NEAREST)
 
+def align_face(face_region, landmarks):
+    # Get eye centers
+    left_eye = np.mean(landmarks[36:42], axis=0)
+    right_eye = np.mean(landmarks[42:48], axis=0)
+    
+    # Calculate angle between eyes
+    dy = right_eye[1] - left_eye[1]
+    dx = right_eye[0] - left_eye[0]
+    angle = np.degrees(np.arctan2(dy, dx))
+    
+    # Rotate and scale face
+    M = cv2.getRotationMatrix2D((face_region.shape[1]//2, face_region.shape[0]//2), angle, 1)
+    return cv2.warpAffine(face_region, M, (face_region.shape[1], face_region.shape[0]))
+
+def create_alpha_mask(shape):
+    mask = np.zeros(shape, dtype=np.uint8)
+    cv2.ellipse(mask, 
+               (mask.shape[1]//2, mask.shape[0]//2),
+               (mask.shape[1]//2, mask.shape[0]//2),
+               0, 0, 360, 255, -1)
+    return cv2.GaussianBlur(mask, (15,15), 0) / 255.0
+
+def swap_faces_effect(img):
+    global last_face
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    faces = face_detector(gray)
+    
+    if len(faces) >= 2:
+        # Get facial landmarks for both faces
+        face1 = landmark_predictor(gray, faces[0])
+        face2 = landmark_predictor(gray, faces[1])
+        (x1, y1, w1, h1) = face_utils.rect_to_bb(faces[0])
+        (x2, y2, w2, h2) = face_utils.rect_to_bb(faces[1])
+
+        # Extract face regions
+        face1_region = img[y1:y1+h1, x1:x1+w1]
+        face2_region = img[y2:y2+h2, x2:x2+w2]
+
+        # Resize faces to match each other's dimensions
+        face1_resized = cv2.resize(face1_region, (w2, h2))
+        face2_resized = cv2.resize(face2_region, (w1, h1))
+
+        # Create masks for seamless cloning
+        mask1 = 255 * np.ones(face1_resized.shape, face1_resized.dtype)
+        mask2 = 255 * np.ones(face2_resized.shape, face2_resized.dtype)
+
+        # Swap faces using seamless cloning
+        img = cv2.seamlessClone(face1_resized, img, mask1, (x2+w2//2, y2+h2//2), cv2.NORMAL_CLONE)
+        img = cv2.seamlessClone(face2_resized, img, mask2, (x1+w1//2, y1+h1//2), cv2.NORMAL_CLONE)
+
+    return img
+
+face_cascade = cv2.CascadeClassifier("haarcascade_frontalface_default.xml")
+eye_cascade = cv2.CascadeClassifier('haarcascade_eye.xml')
+
+# https://media.geeksforgeeks.org/wp-content/uploads/20250415122920890394/harr_casscade_classifiers.zip
+
+def simple_face_swap(img):
+    faces = face_cascade.detectMultiScale(img, 1.3, 5)
+    
+    if len(faces) >= 2:
+        x1,y1,w1,h1 = faces[0]
+        x2,y2,w2,h2 = faces[1]
+        
+        face1 = img[y1:y1+h1, x1:x1+w1]
+        face2 = img[y2:y2+h2, x2:x2+w2]
+        
+        # Resize faces to match each other's dimensions
+        face1 = cv2.resize(face1, (w2, h2))
+        face2 = cv2.resize(face2, (w1, h1))
+        
+        # Swap faces
+        img[y1:y1+h1, x1:x1+w1] = face2
+        img[y2:y2+h2, x2:x2+w2] = face1
+        
+    return img
 
 def toggle_slider_visibility(effect):
     if effect in ['dots', 'fish_eye', 'pixelate']:
@@ -203,6 +286,8 @@ def update_frame():
         out = outline_effect(frame)
     elif current_effect == 'retro_game':
         out = retro_game_effect(frame)
+    elif current_effect == 'face_swap':
+        out = swap_faces_effect(frame)
     else:
         out = frame
 
@@ -253,6 +338,9 @@ btn_outline.pack(side=tk.LEFT)
 
 btn_retro_game = tk.Button(button_frame, text="Gra retro", width=20, command=lambda: change_effect('retro_game'))
 btn_retro_game.pack(side=tk.LEFT)
+
+btn_face_swap = tk.Button(button_frame, text="Swap Faces", width=20, command=lambda: change_effect('face_swap'))
+btn_face_swap.pack(side=tk.LEFT)
 
 slider = ttk.Scale(root, from_=0, to=180, orient=tk.HORIZONTAL, command=update_slider)
 slider.pack(fill=tk.X, padx=10, pady=10)
